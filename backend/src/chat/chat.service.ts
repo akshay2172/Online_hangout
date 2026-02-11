@@ -1,4 +1,4 @@
-// backend/chat/chat.service.ts
+// backend/chat/chat.service.ts - ENHANCED WITH MODERATION
 import { Injectable } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
@@ -14,11 +14,13 @@ export interface RoomUser {
   isActive: boolean;
   avatar?: string;
   status?: string;
+  role?: 'owner' | 'admin' | 'moderator' | 'member';
 }
 
 @Injectable()
 export class ChatService {
   private activeUsers: Record<string, RoomUser[]> = {};
+  private bannedUsers: Map<string, Set<string>> = new Map(); // room -> set of banned usernames
 
   constructor(
     @InjectModel(Message.name) private messageModel: Model<MessageDocument>,
@@ -55,6 +57,52 @@ export class ChatService {
     return null;
   }
 
+  getUserSocketId(room: string, username: string): string | undefined {
+    const user = this.activeUsers[room]?.find(u => u.name === username);
+    return user?.socketId;
+  }
+
+  // Ban Management
+  async banUserFromRoom(roomName: string, username: string): Promise<void> {
+    const room = await this.roomModel.findOne({ name: roomName });
+    if (room) {
+      if (!room.bannedUsers) {
+        room.bannedUsers = [];
+      }
+      if (!room.bannedUsers.includes(username)) {
+        room.bannedUsers.push(username);
+        await room.save();
+      }
+    }
+    
+    // Also add to in-memory cache
+    if (!this.bannedUsers.has(roomName)) {
+      this.bannedUsers.set(roomName, new Set());
+    }
+    this.bannedUsers.get(roomName)?.add(username);
+  }
+
+  async isUserBanned(roomName: string, username: string): Promise<boolean> {
+    // Check in-memory cache first
+    if (this.bannedUsers.get(roomName)?.has(username)) {
+      return true;
+    }
+    
+    // Check database
+    const room = await this.roomModel.findOne({ name: roomName });
+    return room?.bannedUsers?.includes(username) || false;
+  }
+
+  async unbanUserFromRoom(roomName: string, username: string): Promise<void> {
+    const room = await this.roomModel.findOne({ name: roomName });
+    if (room && room.bannedUsers) {
+      room.bannedUsers = room.bannedUsers.filter(u => u !== username);
+      await room.save();
+    }
+    
+    this.bannedUsers.get(roomName)?.delete(username);
+  }
+
   // Message CRUD with Database
   async createMessage(messageData: any): Promise<MessageDocument> {
     const message = new this.messageModel(messageData);
@@ -87,20 +135,19 @@ export class ChatService {
   }
 
   // Edit Message
-// CORRECT - Updates message field
-async editMessage(messageId: string, newMessage: string): Promise<MessageDocument | null> {
-  return await this.messageModel
-    .findByIdAndUpdate(
-      messageId,
-      {
-        message: newMessage,  // ✅ CORRECT FIELD
-        isEdited: true,
-        editedAt: new Date(),
-      },
-      { new: true }
-    )
-    .exec();
-}
+  async editMessage(messageId: string, newMessage: string): Promise<MessageDocument | null> {
+    return await this.messageModel
+      .findByIdAndUpdate(
+        messageId,
+        {
+          message: newMessage,
+          isEdited: true,
+          editedAt: new Date(),
+        },
+        { new: true }
+      )
+      .exec();
+  }
 
   // Reactions
   async addReaction(messageId: string, emoji: string, username: string): Promise<MessageDocument | null> {
@@ -243,6 +290,14 @@ async editMessage(messageId: string, newMessage: string): Promise<MessageDocumen
     return await this.roomModel.findOne({ name }).exec();
   }
 
+  async getRoomById(id: string): Promise<RoomDocument | null> {
+    return await this.roomModel.findById(id).exec();
+  }
+
+  async getAllRooms(): Promise<RoomDocument[]> {
+    return await this.roomModel.find({ isActive: true }).exec();
+  }
+
   async getRoomsByUser(username: string): Promise<RoomDocument[]> {
     return await this.roomModel
       .find({ members: username, isActive: true })
@@ -264,6 +319,26 @@ async editMessage(messageId: string, newMessage: string): Promise<MessageDocumen
       .findOneAndUpdate(
         { name: roomName },
         { $pull: { members: username } },
+        { new: true }
+      )
+      .exec();
+  }
+
+  async deleteRoom(roomId: string): Promise<RoomDocument | null> {
+    return await this.roomModel
+      .findByIdAndUpdate(roomId, { isActive: false }, { new: true })
+      .exec();
+  }
+
+  async promoteUser(roomName: string, username: string, role: 'moderator' | 'admin'): Promise<RoomDocument | null> {
+    const updateField = role === 'moderator' 
+      ? { $addToSet: { moderators: username } }
+      : { $addToSet: { admins: username } };
+    
+    return await this.roomModel
+      .findOneAndUpdate(
+        { name: roomName },
+        updateField,
         { new: true }
       )
       .exec();
@@ -302,5 +377,47 @@ async editMessage(messageId: string, newMessage: string): Promise<MessageDocumen
       readBy: { $ne: username },
       isDeleted: false,
     });
+  }
+
+  // Block user (DM level)
+  async blockUser(blockerUsername: string, blockedUsername: string): Promise<UserDocument | null> {
+    return await this.userModel
+      .findOneAndUpdate(
+        { username: blockerUsername },
+        { $addToSet: { blockedUsers: blockedUsername } },
+        { new: true }
+      )
+      .exec();
+  }
+
+  async unblockUser(blockerUsername: string, blockedUsername: string): Promise<UserDocument | null> {
+    return await this.userModel
+      .findOneAndUpdate(
+        { username: blockerUsername },
+        { $pull: { blockedUsers: blockedUsername } },
+        { new: true }
+      )
+      .exec();
+  }
+
+  async isUserBlocked(blockerUsername: string, blockedUsername: string): Promise<boolean> {
+    const user = await this.userModel.findOne({ username: blockerUsername });
+    return user?.blockedUsers?.includes(blockedUsername) || false;
+  }
+
+  // Infinite scroll - load older messages
+  async loadOlderMessages(room: string, beforeMessageId: string, limit: number = 50): Promise<MessageDocument[]> {
+    const beforeMessage = await this.messageModel.findById(beforeMessageId);
+    if (!beforeMessage) return [];
+
+    return await this.messageModel
+      .find({
+        room,
+        isDeleted: false,
+        createdAt: { $lt: beforeMessage.createdAt },
+      })
+      .sort({ createdAt: -1 })
+      .limit(limit)
+      .exec();
   }
 }

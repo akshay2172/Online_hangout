@@ -21,6 +21,12 @@ export class Room {
   @Prop({ type: [String], default: [] })
   moderators: string[];
 
+  @Prop({ type: [String], default: [] })
+  admins: string[];
+
+  @Prop({ type: [String], default: [] })
+  bannedUsers: string[];
+
   @Prop({ type: String, default: 'public' })
   type: 'public' | 'private' | 'direct';
 
@@ -36,6 +42,7 @@ export class Room {
     allowVoiceMessages: boolean;
     maxFileSize: number; // in MB
     muteNotifications: boolean;
+    slowMode: number; // seconds between messages
   };
 
   @Prop({ default: true })
@@ -48,3 +55,4 @@ export const RoomSchema = SchemaFactory.createForClass(Room);
 RoomSchema.index({ name: 1 });
 RoomSchema.index({ members: 1 });
 RoomSchema.index({ type: 1 });
+RoomSchema.index({ isActive: 1 });

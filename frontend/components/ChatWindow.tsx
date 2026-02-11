@@ -1,6 +1,6 @@
-// frontend/components/ChatWindow.tsx - FINAL VERSION WITH ALL FEATURES
-import React, { useEffect, useRef, useState } from 'react';
-import EmojiPicker, { EmojiClickData } from 'emoji-picker-react';
+// frontend/components/ChatWindow.tsx - ENHANCED WITH THEME & INTERACTIONS
+import React, { useEffect, useRef, useState, useCallback } from 'react';
+import EmojiPicker, { EmojiClickData, Theme as EmojiTheme } from 'emoji-picker-react';
 import {
   MoreVertical,
   Reply,
@@ -22,7 +22,11 @@ import {
   Copy,
   Forward,
   AtSign,
+  UserX,
+  Shield,
+  Ban,
 } from 'lucide-react';
+import { useDarkMode } from '../pages/_app';
 
 export interface Message {
   _id?: string;
@@ -42,7 +46,7 @@ export interface Message {
   isEdited?: boolean;
   editedAt?: string;
   isPinned?: boolean;
-  messageType?: 'text' | 'file' | 'image' | 'voice';
+  messageType?: 'text' | 'file' | 'image' | 'voice' | 'gif' | 'sticker';
   fileData?: {
     filename: string;
     originalName: string;
@@ -51,6 +55,7 @@ export interface Message {
     url: string;
   };
   mentions?: string[];
+  status?: 'online' | 'away' | 'busy' | 'offline';
 }
 
 interface Props {
@@ -63,7 +68,11 @@ interface Props {
   onPinMessage?: (messageId: string) => void;
   onUnpinMessage?: (messageId: string) => void;
   onReact: (messageId: string, emoji: string, action: 'add' | 'remove') => void;
+  onKickUser?: (username: string) => void;
+  onBanUser?: (username: string) => void;
+  onBlockUser?: (username: string) => void;
   currentUser?: string;
+  currentUserRole?: 'owner' | 'admin' | 'moderator' | 'member';
   replyTo?: Message | null;
   onCancelReply?: () => void;
   onSearch?: (query: string) => void;
@@ -72,6 +81,9 @@ interface Props {
   unreadMessageId?: string | null;
   showSearch?: boolean;
   onToggleSearch?: () => void;
+  onJumpToMessage?: (messageId: string) => void;
+  highlightedMessageId?: string | null;
+  users?: Array<{ name: string; status?: string; avatar?: string; role?: string }>;
 }
 
 const ChatWindow: React.FC<Props> = ({
@@ -82,7 +94,11 @@ const ChatWindow: React.FC<Props> = ({
   onEditMessage,
   onPinMessage,
   onUnpinMessage,
+  onKickUser,
+  onBanUser,
+  onBlockUser,
   currentUser = 'You',
+  currentUserRole = 'member',
   replyTo,
   onReact,
   onCancelReply,
@@ -92,6 +108,9 @@ const ChatWindow: React.FC<Props> = ({
   unreadMessageId = null,
   showSearch = false,
   onToggleSearch,
+  onJumpToMessage,
+  highlightedMessageId,
+  users = [],
 }) => {
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
   const chatRef = useRef<HTMLDivElement | null>(null);
@@ -101,9 +120,10 @@ const ChatWindow: React.FC<Props> = ({
   const [menuPosition, setMenuPosition] = useState<'top' | 'bottom'>('bottom');
   const [editingMessage, setEditingMessage] = useState<string | null>(null);
   const [editText, setEditText] = useState('');
-  const [searchQuery, setSearchQuery] = useState('');
   const [showPinned, setShowPinned] = useState(false);
+  const [tempHighlight, setTempHighlight] = useState<string | null>(null);
   const messageRefs = useRef<Map<string, HTMLDivElement>>(new Map());
+  const { darkMode } = useDarkMode();
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -184,38 +204,55 @@ const ChatWindow: React.FC<Props> = ({
   const handleCopyText = (text: string) => {
     navigator.clipboard.writeText(text);
     setActiveMenu(null);
-    // Could show a toast notification here
   };
 
   const handleForward = (msg: Message) => {
-    // Store message in localStorage for forwarding
     localStorage.setItem('forwardedMessage', JSON.stringify({
       text: msg.message,
       sender: msg.sender,
     }));
     setActiveMenu(null);
-    alert('Message ready to forward! Paste in another chat.');
+    // Dispatch event to show toast
+    window.dispatchEvent(new CustomEvent('showToast', { detail: 'Message ready to forward!' }));
   };
 
   const handleMention = (username: string) => {
-    // This will add @username to the input
     const event = new CustomEvent('addMention', { detail: username });
     window.dispatchEvent(event);
     setActiveMenu(null);
   };
 
-  const scrollToMessage = (messageId: string) => {
+  // Enhanced scroll to message with highlight animation
+  const scrollToMessage = useCallback((messageId: string, highlight: boolean = true) => {
     const messageEl = messageRefs.current.get(messageId);
-    if (messageEl) {
+    if (messageEl && chatRef.current) {
       messageEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
-
-      // Add highlight effect
-      messageEl.style.backgroundColor = '#fef3c7'; // Yellow highlight
-      setTimeout(() => {
-        messageEl.style.backgroundColor = '';
-      }, 2000);
+      
+      if (highlight) {
+        setTempHighlight(messageId);
+        // Add CSS class for animation
+        messageEl.classList.add('animate-message-highlight');
+        messageEl.classList.add('animate-message-highlight-pulse');
+        
+        setTimeout(() => {
+          messageEl.classList.remove('animate-message-highlight');
+          messageEl.classList.remove('animate-message-highlight-pulse');
+          setTempHighlight(null);
+        }, 3000);
+      }
     }
-  };
+  }, []);
+
+  // Expose scrollToMessage via callback
+  useEffect(() => {
+    if (onJumpToMessage) {
+      const handleJump = (e: CustomEvent) => {
+        scrollToMessage(e.detail, true);
+      };
+      window.addEventListener('jumpToMessage', handleJump as EventListener);
+      return () => window.removeEventListener('jumpToMessage', handleJump as EventListener);
+    }
+  }, [onJumpToMessage, scrollToMessage]);
 
   const formatTime = (timestamp?: string) => {
     if (!timestamp) return '';
@@ -243,12 +280,39 @@ const ChatWindow: React.FC<Props> = ({
     return onlineUsers.includes(username);
   };
 
+  const getUserStatus = (username: string): string => {
+    const user = users.find(u => u.name === username);
+    return user?.status || (isUserOnline(username) ? 'online' : 'offline');
+  };
+
+  const getUserAvatar = (username: string): string | undefined => {
+    const user = users.find(u => u.name === username);
+    return user?.avatar;
+  };
+
   const getRepliedMessage = (replyToId: string | null): Message | null => {
     if (!replyToId) return null;
     return messages.find(m => (m._id || m.id?.toString()) === replyToId) || null;
   };
 
-  const renderMessageContent = (msg: Message) => {
+  const getStatusColor = (status?: string) => {
+    switch (status) {
+      case 'online': return 'bg-green-500';
+      case 'away': return 'bg-yellow-500';
+      case 'busy': return 'bg-red-500';
+      default: return 'bg-gray-400';
+    }
+  };
+
+  const canModerate = (targetUser: string) => {
+    if (targetUser === currentUser) return false;
+    if (currentUserRole === 'owner') return true;
+    if (currentUserRole === 'admin') return true;
+    if (currentUserRole === 'moderator') return true;
+    return false;
+  };
+
+  const renderMessageContent = (msg: Message, isMe: boolean = false) => {
     const msgId = getMessageId(msg);
     const isEditing = editingMessage === msgId;
 
@@ -258,20 +322,29 @@ const ChatWindow: React.FC<Props> = ({
           <textarea
             value={editText}
             onChange={(e) => setEditText(e.target.value)}
-            className="w-full p-2 border border-gray-300 dark:border-gray-600 rounded-lg resize-none focus:outline-none focus:ring-2 focus:ring-blue-500 dark:bg-gray-700 dark:text-white"
+            className="w-full p-2 border rounded-lg resize-none focus:outline-none focus:ring-2 focus:ring-blue-500 transition-colors"
+            style={{
+              backgroundColor: 'var(--bg-secondary)',
+              borderColor: 'var(--border-color)',
+              color: 'var(--text-primary)',
+            }}
             rows={3}
             autoFocus
           />
           <div className="flex gap-2">
             <button
               onClick={() => handleSaveEdit(msgId)}
-              className="px-3 py-1 bg-blue-500 text-white rounded-lg text-sm hover:bg-blue-600"
+              className="px-3 py-1 bg-blue-500 text-white rounded-lg text-sm hover:bg-blue-600 transition-colors"
             >
               Save
             </button>
             <button
               onClick={handleCancelEdit}
-              className="px-3 py-1 bg-gray-200 dark:bg-gray-600 text-gray-700 dark:text-gray-200 rounded-lg text-sm hover:bg-gray-300 dark:hover:bg-gray-500"
+              className="px-3 py-1 rounded-lg text-sm transition-colors"
+              style={{
+                backgroundColor: 'var(--bg-tertiary)',
+                color: 'var(--text-secondary)',
+              }}
             >
               Cancel
             </button>
@@ -286,28 +359,52 @@ const ChatWindow: React.FC<Props> = ({
           <img
             src={msg.fileData.url}
             alt={msg.fileData.originalName}
-            className="max-w-sm max-h-64 rounded-lg cursor-pointer"
+            className="max-w-sm max-h-64 rounded-lg cursor-pointer hover:opacity-90 transition-opacity"
             onClick={() => window.open(msg.fileData?.url, '_blank')}
           />
-          <p className="text-xs opacity-75">{msg.fileData.originalName}</p>
+          <p className="text-xs opacity-75" style={{ color: 'var(--text-muted)' }}>
+            {msg.fileData.originalName}
+          </p>
+        </div>
+      );
+    }
+
+    if (msg.messageType === 'gif' || msg.messageType === 'sticker') {
+      return (
+        <div className="space-y-2">
+          <img
+            src={msg.message}
+            alt="GIF/Sticker"
+            className="max-w-sm max-h-64 rounded-lg"
+          />
         </div>
       );
     }
 
     if (msg.messageType === 'file' && msg.fileData) {
       return (
-        <div className="flex items-center gap-3 p-3 bg-gray-50 dark:bg-gray-700 rounded-lg">
-          <File className="w-8 h-8 text-gray-500 dark:text-gray-400" />
+        <div 
+          className="flex items-center gap-3 p-3 rounded-lg transition-colors"
+          style={{ backgroundColor: 'var(--bg-secondary)' }}
+        >
+          <File className="w-8 h-8" style={{ color: 'var(--text-muted)' }} />
           <div className="flex-1 min-w-0">
-            <p className="text-sm font-medium truncate dark:text-white">{msg.fileData.originalName}</p>
-            <p className="text-xs text-gray-500 dark:text-gray-400">{formatFileSize(msg.fileData.size)}</p>
+            <p className="text-sm font-medium truncate" style={{ color: 'var(--text-primary)' }}>
+              {msg.fileData.originalName}
+            </p>
+            <p className="text-xs" style={{ color: 'var(--text-muted)' }}>
+              {formatFileSize(msg.fileData.size)}
+            </p>
           </div>
           <a
             href={msg.fileData.url}
             download={msg.fileData.originalName}
-            className="p-2 hover:bg-gray-200 dark:hover:bg-gray-600 rounded-full"
+            className="p-2 rounded-full transition-colors"
+            style={{ '--hover-bg': 'var(--bg-tertiary)' } as React.CSSProperties}
+            onMouseEnter={(e) => e.currentTarget.style.backgroundColor = 'var(--bg-tertiary)'}
+            onMouseLeave={(e) => e.currentTarget.style.backgroundColor = 'transparent'}
           >
-            <Download className="w-4 h-4" />
+            <Download className="w-4 h-4" style={{ color: 'var(--text-primary)' }} />
           </a>
         </div>
       );
@@ -315,7 +412,10 @@ const ChatWindow: React.FC<Props> = ({
 
     if (msg.messageType === 'voice' && msg.fileData) {
       return (
-        <div className="flex items-center gap-3 p-3 bg-gray-50 dark:bg-gray-700 rounded-lg">
+        <div 
+          className="flex items-center gap-3 p-3 rounded-lg"
+          style={{ backgroundColor: 'var(--bg-secondary)' }}
+        >
           <Play className="w-6 h-6 text-blue-500" />
           <audio controls className="flex-1">
             <source src={msg.fileData.url} type={msg.fileData.mimetype} />
@@ -328,9 +428,10 @@ const ChatWindow: React.FC<Props> = ({
     if (msg.mentions && msg.mentions.length > 0) {
       msg.mentions.forEach(mention => {
         const mentionRegex = new RegExp(`@${mention}\\b`, 'gi');
+        const mentionClass = isMe ? 'mention-highlight-me' : 'mention-highlight';
         displayMessage = displayMessage.replace(
           mentionRegex,
-          `<span class="bg-blue-100 dark:bg-blue-900 text-blue-600 dark:text-blue-300 px-1 rounded">@${mention}</span>`
+          `<span class="${mentionClass}">@${mention}</span>`
         );
       });
     }
@@ -338,23 +439,32 @@ const ChatWindow: React.FC<Props> = ({
     return (
       <div>
         <p
-          className="message-text text-[15px] leading-relaxed"
+          className={`message-text text-[15px] leading-relaxed ${isMe ? 'text-white' : ''}`}
+          style={!isMe ? { color: 'var(--text-primary)' } : {}}
           dangerouslySetInnerHTML={{ __html: displayMessage }}
         />
         {msg.isEdited && (
-          <p className="text-xs opacity-60 mt-1">(edited)</p>
+          <p className="text-xs mt-1" style={{ color: 'var(--text-muted)' }}>
+            (edited)
+          </p>
         )}
       </div>
     );
   };
 
   return (
-    <div className="flex flex-col h-full bg-white dark:bg-gray-900 overflow-hidden relative">
+    <div 
+      className="flex flex-col h-full overflow-hidden relative"
+      style={{ backgroundColor: 'var(--bg-primary)' }}
+    >
+      {/* Pinned Messages Bar */}
       {pinnedMessages.length > 0 && (
-        <div className="bg-amber-50 dark:bg-amber-900/20 border-b border-amber-100 dark:border-amber-800 px-6 py-2 shrink-0">
+        <div 
+          className="border-b px-6 py-2 shrink-0 pinned-bar transition-all duration-300"
+        >
           <button
             onClick={() => setShowPinned(!showPinned)}
-            className="flex items-center gap-2 text-sm text-amber-700 dark:text-amber-400 hover:text-amber-800 dark:hover:text-amber-300"
+            className="flex items-center gap-2 text-sm hover:opacity-80 transition-opacity"
           >
             <Pin className="w-4 h-4" />
             <span>{pinnedMessages.length} pinned message{pinnedMessages.length > 1 ? 's' : ''}</span>
@@ -364,11 +474,15 @@ const ChatWindow: React.FC<Props> = ({
               {pinnedMessages.map(msg => (
                 <div
                   key={getMessageId(msg)}
-                  className="text-sm p-2 bg-white dark:bg-gray-800 rounded cursor-pointer hover:bg-gray-100"
-                  onClick={() => scrollToMessage(getMessageId(msg))}  // ADD THIS
+                  className="text-sm p-2 rounded cursor-pointer transition-all hover:opacity-80"
+                  style={{ 
+                    backgroundColor: 'var(--bg-primary)',
+                    color: 'var(--text-primary)'
+                  }}
+                  onClick={() => scrollToMessage(getMessageId(msg))}
                 >
-                  <span className="font-medium dark:text-white">{msg.sender}:</span>
-                  {msg.message.substring(0, 60)}...
+                  <span className="font-medium">{msg.sender}:</span>
+                  <span className="ml-1 opacity-80">{msg.message.substring(0, 60)}...</span>
                 </div>
               ))}
             </div>
@@ -376,15 +490,23 @@ const ChatWindow: React.FC<Props> = ({
         </div>
       )}
 
+      {/* Messages Container */}
       <div
         ref={chatRef}
         onScroll={onScroll}
-        className="flex-1 overflow-y-auto overflow-x-hidden px-6 py-4 space-y-6 bg-gray-50 dark:bg-gray-900"
+        className="flex-1 overflow-y-auto overflow-x-hidden px-6 py-4 space-y-6"
+        style={{ backgroundColor: 'var(--bg-secondary)' }}
       >
         {messages.length === 0 ? (
-          <div className="flex flex-col items-center justify-center h-full text-gray-400 dark:text-gray-500 space-y-3">
-            <div className="w-16 h-16 bg-gray-100 dark:bg-gray-800 rounded-full flex items-center justify-center">
-              <MessageSquare className="w-8 h-8 text-gray-300 dark:text-gray-600" />
+          <div 
+            className="flex flex-col items-center justify-center h-full space-y-3"
+            style={{ color: 'var(--text-muted)' }}
+          >
+            <div 
+              className="w-16 h-16 rounded-full flex items-center justify-center"
+              style={{ backgroundColor: 'var(--bg-tertiary)' }}
+            >
+              <MessageSquare className="w-8 h-8" style={{ color: 'var(--text-muted)' }} />
             </div>
             <p className="text-sm">No messages yet</p>
           </div>
@@ -393,12 +515,15 @@ const ChatWindow: React.FC<Props> = ({
             const isMe = msg.sender === currentUser;
             const msgId = getMessageId(msg);
             const showActions = hoveredMessage === msgId || activeMenu === msgId || activeEmojiPicker === msgId;
-            const userOnline = isUserOnline(msg.sender);
             const isUnreadStart = msgId === unreadMessageId;
             const repliedMsg = getRepliedMessage(msg.replyTo);
+            const isHighlighted = msgId === highlightedMessageId || msgId === tempHighlight;
+            const userStatus = getUserStatus(msg.sender);
+            const userAvatar = getUserAvatar(msg.sender);
 
             return (
               <React.Fragment key={msgId}>
+                {/* Unread Messages Divider */}
                 {isUnreadStart && (
                   <div className="flex items-center gap-3 my-4">
                     <div className="flex-1 h-px bg-red-400"></div>
@@ -417,43 +542,56 @@ const ChatWindow: React.FC<Props> = ({
                       messageRefs.current.delete(msgId);
                     }
                   }}
-
-                  className={`group flex items-start gap-3 ${isMe ? 'flex-row-reverse' : 'flex-row'}`}
+                  className={`group flex items-start gap-3 ${isMe ? 'flex-row-reverse' : 'flex-row'} ${
+                    isHighlighted ? 'animate-message-highlight animate-message-highlight-pulse' : ''
+                  }`}
                   onMouseEnter={() => setHoveredMessage(msgId)}
                   onMouseLeave={() => {
                     if (activeMenu !== msgId && activeEmojiPicker !== msgId) {
                       setHoveredMessage(null);
                     }
                   }}
+                  data-message-id={msgId}
                 >
+                  {/* Avatar */}
                   {!isMe && (
-                    <div className="relative">
-                      {msg.avatar ? (
-                        <img src={msg.avatar} alt={msg.sender} className="w-8 h-8 rounded-full object-cover" />
+                    <div className="relative shrink-0">
+                      {userAvatar ? (
+                        <img 
+                          src={userAvatar} 
+                          alt={msg.sender} 
+                          className="w-8 h-8 rounded-full object-cover" 
+                        />
                       ) : (
-                        <div className="w-8 h-8 rounded-full bg-gradient-to-br from-gray-300 to-gray-400 flex items-center justify-center text-white text-sm font-medium shrink-0">
+                        <div 
+                          className="w-8 h-8 rounded-full flex items-center justify-center text-white text-sm font-medium"
+                          style={{ backgroundColor: 'var(--accent-color)' }}
+                        >
                           {msg.sender.charAt(0).toUpperCase()}
                         </div>
                       )}
-                      {userOnline && (
-                        <div className="absolute -bottom-0.5 -right-0.5 w-3 h-3 bg-green-500 border-2 border-white dark:border-gray-900 rounded-full"></div>
-                      )}
+                      {/* Status Indicator */}
+                      <div 
+                        className={`absolute -bottom-0.5 -right-0.5 w-3 h-3 border-2 rounded-full ${getStatusColor(userStatus)}`}
+                        style={{ borderColor: 'var(--bg-primary)' }}
+                      />
                     </div>
                   )}
 
                   <div className={`flex flex-col min-w-0 ${isMe ? 'items-end' : 'items-start'} max-w-[70%]`}>
+                    {/* Reply Preview */}
                     {repliedMsg && (
-                      <div className={`mb-1.5 px-3 py-2 rounded-lg cursor-pointer text-sm border-l-4 cursor-pointer hover:bg-opacity-80 ${isMe
-                        ? 'bg-blue-50 dark:bg-blue-900/20 text-blue-800 dark:text-blue-300 border-blue-400'
-                        : 'bg-gray-100 dark:bg-gray-800 text-gray-700 dark:text-gray-300 border-gray-400 dark:border-gray-600'
-                        }`}
+                      <div 
+                        className={`mb-1.5 px-3 py-2 rounded-lg cursor-pointer text-sm border-l-4 transition-all hover:opacity-80 reply-preview`}
                         onClick={() => scrollToMessage(getMessageId(repliedMsg))}
                       >
                         <div className="flex items-start gap-2">
-                          <Reply className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+                          <Reply className="w-3.5 h-3.5 shrink-0 mt-0.5" style={{ color: 'var(--accent-color)' }} />
                           <div className="min-w-0 flex-1">
-                            <div className="font-semibold text-xs mb-0.5">{repliedMsg.sender}</div>
-                            <div className="text-sm leading-relaxed break-words line-clamp-2">
+                            <div className="font-semibold text-xs mb-0.5" style={{ color: 'var(--text-secondary)' }}>
+                              {repliedMsg.sender}
+                            </div>
+                            <div className="text-sm leading-relaxed break-words line-clamp-2" style={{ color: 'var(--text-muted)' }}>
                               {repliedMsg.message}
                             </div>
                           </div>
@@ -462,36 +600,62 @@ const ChatWindow: React.FC<Props> = ({
                     )}
 
                     <div className="relative min-w-0 max-w-full">
+                      {/* Message Actions */}
                       {showActions && (
                         <div
-                          className={`absolute ${isMe ? 'right-full mr-2' : 'left-full ml-2'} top-1/2 -translate-y-1/2 flex items-center space-x-1 bg-white dark:bg-gray-700 rounded-full shadow-lg border border-gray-200 dark:border-gray-600 p-1 z-10`}
+                          className={`absolute ${isMe ? 'right-full mr-2' : 'left-full ml-2'} top-1/2 -translate-y-1/2 flex items-center space-x-1 rounded-full shadow-lg border p-1 z-10 transition-all`}
+                          style={{ 
+                            backgroundColor: 'var(--menu-bg)',
+                            borderColor: 'var(--border-color)'
+                          }}
                         >
                           <button
                             onClick={(e) => handleMenuToggle(msgId, e)}
-                            className="w-7 h-7 flex items-center justify-center hover:bg-gray-100 dark:hover:bg-gray-600 rounded-full text-gray-500 dark:text-gray-300 transition-colors"
+                            className="w-7 h-7 flex items-center justify-center rounded-full transition-colors"
+                            style={{ 
+                              color: 'var(--text-muted)',
+                              '--hover-bg': 'var(--menu-hover)'
+                            } as React.CSSProperties}
+                            onMouseEnter={(e) => e.currentTarget.style.backgroundColor = 'var(--menu-hover)'}
+                            onMouseLeave={(e) => e.currentTarget.style.backgroundColor = 'transparent'}
                           >
                             <MoreVertical className="w-4 h-4" />
                           </button>
                         </div>
                       )}
 
+                      {/* Message Bubble */}
                       <div
-                        className={`px-4 py-2.5 rounded-2xl relative min-w-0 max-w-full ${isMe
-                          ? 'bg-blue-500 text-white rounded-br-md'
-                          : 'bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 text-gray-800 dark:text-gray-200 rounded-bl-md shadow-sm'
-                          } ${msg.isReported ? 'opacity-60' : ''} ${msg.isPinned ? 'ring-2 ring-amber-400' : ''}`}
+                        className={`px-4 py-2.5 rounded-2xl relative min-w-0 max-w-full transition-all ${
+                          isMe
+                            ? 'bg-blue-400 dark:bg-blue-500 text-white rounded-br-md'
+                            : 'rounded-bl-md shadow-sm'
+                        } ${msg.isReported ? 'opacity-60' : ''} ${msg.isPinned ? 'ring-2 ring-amber-400' : ''}`}
+                        style={!isMe ? {
+                          backgroundColor: 'var(--bg-primary)',
+                          border: '1px solid var(--border-color)',
+                          color: 'var(--text-primary)'
+                        } : {}}
                       >
                         {msg.isPinned && (
                           <Pin className="w-3 h-3 absolute -top-1 -right-1 text-amber-500" />
                         )}
 
                         {!isMe && (
-                          <p className="text-xs font-medium text-gray-500 dark:text-gray-400 mb-1 break-words">{msg.sender}</p>
+                          <p 
+                            className="text-xs font-medium mb-1 break-words"
+                            style={{ color: 'var(--text-secondary)' }}
+                          >
+                            {msg.sender}
+                          </p>
                         )}
 
-                        {renderMessageContent(msg)}
+                        {renderMessageContent(msg, isMe)}
 
-                        <div className={`flex items-center justify-end mt-1 space-x-1 ${isMe ? 'text-blue-100' : 'text-gray-400 dark:text-gray-500'}`}>
+                        {/* Timestamp & Read Status */}
+                        <div className={`flex items-center justify-end mt-1 space-x-1 ${isMe ? 'text-blue-100' : ''}`}
+                          style={!isMe ? { color: 'var(--text-muted)' } : {}}
+                        >
                           <span className="text-[11px]">{formatTime(msg.timestamp || msg.createdAt)}</span>
                           {isMe && msg.readBy && (
                             msg.readBy.length > 1 ? (
@@ -503,9 +667,10 @@ const ChatWindow: React.FC<Props> = ({
                         </div>
                       </div>
 
+                      {/* Emoji Picker */}
                       {activeEmojiPicker === msgId && (
                         <div
-                          className={`absolute ${isMe ? 'right-0' : 'left-0'} ${menuPosition === 'top' ? 'bottom-full mb-2' : 'top-full mt-2'} z-50 shadow-2xl`}
+                          className={`absolute ${isMe ? 'right-0' : 'left-0'} ${menuPosition === 'top' ? 'bottom-full mb-2' : 'top-full mt-2'} z-50 shadow-2xl rounded-xl overflow-hidden`}
                           onClick={(e) => e.stopPropagation()}
                         >
                           <EmojiPicker
@@ -517,16 +682,19 @@ const ChatWindow: React.FC<Props> = ({
                             height={350}
                             previewConfig={{ showPreview: false }}
                             skinTonesDisabled
+                            theme={darkMode ? EmojiTheme.DARK : EmojiTheme.LIGHT}
                           />
                         </div>
                       )}
 
+                      {/* Message Menu */}
                       {activeMenu === msgId && (
                         <div
-                          className={`absolute ${isMe ? 'right-0' : 'left-0'} ${menuPosition === 'top' ? 'bottom-full mb-2' : 'top-full mt-2'} bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl shadow-xl py-1.5 min-w-[180px] z-50 max-h-[400px] overflow-y-auto`}
+                          className={`absolute ${isMe ? 'right-0' : 'left-0'} ${menuPosition === 'top' ? 'bottom-full mb-2' : 'top-full mt-2'} rounded-xl shadow-xl py-1.5 min-w-[180px] z-50 max-h-[400px] overflow-y-auto theme-menu border`}
                           onClick={(e) => e.stopPropagation()}
                         >
-                          <div className="px-3 py-2 border-b border-gray-100 dark:border-gray-700">
+                          {/* Quick Reactions */}
+                          <div className="px-3 py-2 border-b" style={{ borderColor: 'var(--border-color)' }}>
                             <div className="flex justify-between">
                               {quickReactions.map((emoji) => {
                                 const hasReacted = hasUserReacted(msg, emoji);
@@ -537,8 +705,7 @@ const ChatWindow: React.FC<Props> = ({
                                       onReact(msgId, emoji, hasReacted ? 'remove' : 'add');
                                       setActiveMenu(null);
                                     }}
-                                    className={`text-lg hover:scale-110 transition-transform ${hasReacted ? 'scale-110 opacity-100' : 'opacity-70'
-                                      }`}
+                                    className={`text-lg hover:scale-110 transition-transform ${hasReacted ? 'scale-110 opacity-100' : 'opacity-70'}`}
                                   >
                                     {emoji}
                                   </button>
@@ -547,12 +714,14 @@ const ChatWindow: React.FC<Props> = ({
                             </div>
                           </div>
 
+                          {/* Menu Items */}
                           <button
                             onClick={() => {
                               setActiveEmojiPicker(msgId);
                               setActiveMenu(null);
                             }}
-                            className="w-full px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-50 dark:hover:bg-gray-700 flex items-center gap-2"
+                            className="w-full px-4 py-2 text-sm flex items-center gap-2 theme-menu-item transition-colors"
+                            style={{ color: 'var(--text-primary)' }}
                           >
                             <Smile className="w-4 h-4" />
                             More reactions
@@ -563,7 +732,8 @@ const ChatWindow: React.FC<Props> = ({
                               onReplyToMessage?.(msg);
                               setActiveMenu(null);
                             }}
-                            className="w-full px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-50 dark:hover:bg-gray-700 flex items-center gap-2"
+                            className="w-full px-4 py-2 text-sm flex items-center gap-2 theme-menu-item transition-colors"
+                            style={{ color: 'var(--text-primary)' }}
                           >
                             <Reply className="w-4 h-4" />
                             Reply
@@ -571,7 +741,8 @@ const ChatWindow: React.FC<Props> = ({
 
                           <button
                             onClick={() => handleCopyText(msg.message)}
-                            className="w-full px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-50 dark:hover:bg-gray-700 flex items-center gap-2"
+                            className="w-full px-4 py-2 text-sm flex items-center gap-2 theme-menu-item transition-colors"
+                            style={{ color: 'var(--text-primary)' }}
                           >
                             <Copy className="w-4 h-4" />
                             Copy text
@@ -579,7 +750,8 @@ const ChatWindow: React.FC<Props> = ({
 
                           <button
                             onClick={() => handleForward(msg)}
-                            className="w-full px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-50 dark:hover:bg-gray-700 flex items-center gap-2"
+                            className="w-full px-4 py-2 text-sm flex items-center gap-2 theme-menu-item transition-colors"
+                            style={{ color: 'var(--text-primary)' }}
                           >
                             <Forward className="w-4 h-4" />
                             Forward
@@ -588,30 +760,62 @@ const ChatWindow: React.FC<Props> = ({
                           {!isMe && (
                             <button
                               onClick={() => handleMention(msg.sender)}
-                              className="w-full px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-50 dark:hover:bg-gray-700 flex items-center gap-2"
+                              className="w-full px-4 py-2 text-sm flex items-center gap-2 theme-menu-item transition-colors"
+                              style={{ color: 'var(--text-primary)' }}
                             >
                               <AtSign className="w-4 h-4" />
                               Mention {msg.sender}
                             </button>
                           )}
 
+                          {/* Moderation Actions */}
+                          {!isMe && canModerate(msg.sender) && (
+                            <>
+                              <div className="border-t my-1" style={{ borderColor: 'var(--border-color)' }} />
+                              <button
+                                onClick={() => {
+                                  onKickUser?.(msg.sender);
+                                  setActiveMenu(null);
+                                }}
+                                className="w-full px-4 py-2 text-sm flex items-center gap-2 theme-menu-item text-orange-600 hover:bg-orange-50 dark:hover:bg-orange-900/20"
+                              >
+                                <UserX className="w-4 h-4" />
+                                Kick {msg.sender}
+                              </button>
+                              <button
+                                onClick={() => {
+                                  onBanUser?.(msg.sender);
+                                  setActiveMenu(null);
+                                }}
+                                className="w-full px-4 py-2 text-sm flex items-center gap-2 theme-menu-item text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20"
+                              >
+                                <Ban className="w-4 h-4" />
+                                Ban {msg.sender}
+                              </button>
+                            </>
+                          )}
+
+                          {/* Edit (own messages only) */}
                           {isMe && msg.messageType === 'text' && (
                             <button
                               onClick={() => handleEdit(msg)}
-                              className="w-full px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-50 dark:hover:bg-gray-700 flex items-center gap-2"
+                              className="w-full px-4 py-2 text-sm flex items-center gap-2 theme-menu-item transition-colors"
+                              style={{ color: 'var(--text-primary)' }}
                             >
                               <Edit className="w-4 h-4" />
                               Edit
                             </button>
                           )}
 
+                          {/* Pin/Unpin */}
                           {msg.isPinned ? (
                             <button
                               onClick={() => {
                                 onUnpinMessage?.(msgId);
                                 setActiveMenu(null);
                               }}
-                              className="w-full px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-50 dark:hover:bg-gray-700 flex items-center gap-2"
+                              className="w-full px-4 py-2 text-sm flex items-center gap-2 theme-menu-item transition-colors"
+                              style={{ color: 'var(--text-primary)' }}
                             >
                               <PinOff className="w-4 h-4" />
                               Unpin
@@ -622,31 +826,34 @@ const ChatWindow: React.FC<Props> = ({
                                 onPinMessage?.(msgId);
                                 setActiveMenu(null);
                               }}
-                              className="w-full px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-50 dark:hover:bg-gray-700 flex items-center gap-2"
+                              className="w-full px-4 py-2 text-sm flex items-center gap-2 theme-menu-item transition-colors"
+                              style={{ color: 'var(--text-primary)' }}
                             >
                               <Pin className="w-4 h-4" />
                               Pin
                             </button>
                           )}
 
+                          {/* Report */}
                           <button
                             onClick={() => {
                               onReportMessage?.(msgId);
                               setActiveMenu(null);
                             }}
-                            className="w-full px-4 py-2 text-sm text-orange-600 dark:text-orange-400 hover:bg-orange-50 dark:hover:bg-orange-900/20 flex items-center gap-2"
+                            className="w-full px-4 py-2 text-sm flex items-center gap-2 theme-menu-item text-orange-600 hover:bg-orange-50 dark:hover:bg-orange-900/20"
                           >
                             <Flag className="w-4 h-4" />
                             Report
                           </button>
 
+                          {/* Delete */}
                           {isMe && (
                             <button
                               onClick={() => {
                                 onDeleteMessage?.(msgId);
                                 setActiveMenu(null);
                               }}
-                              className="w-full px-4 py-2 text-sm text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/20 flex items-center gap-2"
+                              className="w-full px-4 py-2 text-sm flex items-center gap-2 theme-menu-item text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20"
                             >
                               <Trash2 className="w-4 h-4" />
                               Delete
@@ -656,6 +863,7 @@ const ChatWindow: React.FC<Props> = ({
                       )}
                     </div>
 
+                    {/* Reactions */}
                     {msg.reactions && msg.reactions.length > 0 && (
                       <div className={`flex flex-wrap gap-1 mt-1.5 ${isMe ? 'justify-end' : 'justify-start'}`}>
                         {msg.reactions.map((reaction, i) => {
@@ -664,10 +872,16 @@ const ChatWindow: React.FC<Props> = ({
                             <button
                               key={i}
                               onClick={() => onReact(msgId, reaction.emoji, userHasReacted ? 'remove' : 'add')}
-                              className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-sm border transition-all hover:scale-105 ${userHasReacted
-                                ? 'bg-blue-50 dark:bg-blue-900/30 border-blue-200 dark:border-blue-700 text-blue-600 dark:text-blue-300 shadow-sm'
-                                : 'bg-white dark:bg-gray-800 border-gray-200 dark:border-gray-700 text-gray-600 dark:text-gray-400 hover:bg-gray-50 dark:hover:bg-gray-700'
-                                }`}
+                              className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-sm border transition-all hover:scale-105 ${
+                                userHasReacted
+                                  ? 'bg-blue-50 dark:bg-blue-900/30 border-blue-200 dark:border-blue-700 text-blue-600 dark:text-blue-300 shadow-sm'
+                                  : 'border-gray-200 dark:border-gray-700 hover:bg-gray-50 dark:hover:bg-gray-700'
+                              }`}
+                              style={!userHasReacted ? {
+                                backgroundColor: 'var(--bg-primary)',
+                                borderColor: 'var(--border-color)',
+                                color: 'var(--text-secondary)'
+                              } : {}}
                               title={reaction.users.join(', ')}
                             >
                               <span>{reaction.emoji}</span>

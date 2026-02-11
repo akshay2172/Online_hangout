@@ -1,15 +1,13 @@
-// frontend/pages/room/[id].tsx - FINAL VERSION WITH SEARCH IN HEADER
-import { useEffect, useState, useCallback } from 'react';
+// frontend/pages/room/[id].tsx - FINAL VERSION WITH USER LIST TOGGLE & TYPING INDICATOR
+import { useEffect, useState, useCallback, useRef } from 'react';
 import { useRouter } from 'next/router';
 import socket from '../../utils/socket';
 import ChatWindow from '../../components/ChatWindow';
 import MessageInput from '../../components/MessageInput';
 import UserList from '../../components/UserList';
 import UserToast from '../../components/UserToast';
-import { Search, X } from 'lucide-react';
-import RoomManager from '../../components/RoomManager'
-import UserProfile from '../../components/UserProfile'
-import DirectMessages from '../../components/DirectMessages'
+import TypingIndicator from '../../components/TypingIndicator';
+import { Search, X, Users } from 'lucide-react';
 
 interface User {
   name: string;
@@ -65,6 +63,9 @@ export default function Room() {
   const [showSearch, setShowSearch] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [unreadMessageId, setUnreadMessageId] = useState<string | null>(null);
+  const [showUserList, setShowUserList] = useState(true);
+  
+  const inputRef = useRef<any>(null);
 
   const gender =
     typeof router.query.gender === 'string'
@@ -123,8 +124,6 @@ export default function Room() {
     if (socket.connected) {
       onConnect();
     }
-
-
 
     return () => {
       socket.off('connect', onConnect);
@@ -211,79 +210,87 @@ export default function Room() {
     // Handle message reported - server sends object with messageId
     const onMessageReported = ({ messageId }: { messageId: string }) => {
       setMessages(prev => prev.map(m =>
-        (m._id === messageId) ? { ...m, isReported: true } : m
+        (m._id === messageId || m.id === messageId) ? { ...m, isReported: true } : m
       ));
-      setToasts(prev => [...prev, 'Message reported']);
     };
 
-    const onUpdateUsers = (userList: User[]) => {
-      setUsers(userList);
-    };
-
+    // Handle message deleted
     const onMessageDeleted = ({ messageId }: { messageId: string }) => {
-      setMessages(prev => prev.filter(m => (m._id || m.id) !== messageId));
+      setMessages(prev => prev.filter(m => m._id !== messageId && m.id !== messageId));
     };
 
-    const onMessageReaction = ({ messageId, reactions }: { messageId: string; reactions: any[] }) => {
+    // Handle message unpinned
+    const onMessageUnpinned = (data: { messageId: string } | Message) => {
+      const messageId = 'messageId' in data ? data.messageId : data._id;
       setMessages(prev => prev.map(m =>
-        (m._id || m.id) === messageId ? { ...m, reactions } : m
+        (m._id === messageId || m.id === messageId) ? { ...m, isPinned: false } : m
+      ));
+      setPinnedMessages(prev => prev.filter(m => m._id !== messageId && m.id !== messageId));
+    };
+
+    // Handle reactions
+    const onMessageReaction = (data: { messageId: string; reactions: Array<{ emoji: string; users: string[] }> }) => {
+      setMessages(prev => prev.map(m =>
+        (m._id === data.messageId || m.id === data.messageId)
+          ? { ...m, reactions: data.reactions }
+          : m
       ));
     };
 
-    const onMessageRead = ({ messageId, readBy }: { messageId: string; readBy: string[] }) => {
+    // Handle read receipts
+    const onMessageRead = (data: { messageId: string; readBy: string[] }) => {
       setMessages(prev => prev.map(m =>
-        (m._id || m.id) === messageId ? { ...m, readBy } : m
+        (m._id === data.messageId || m.id === data.messageId)
+          ? { ...m, readBy: data.readBy, isRead: data.readBy.includes(username) }
+          : m
       ));
     };
 
-    const onRoomMarkedAsRead = ({ username: readByUser }: { username: string }) => {
-      if (readByUser !== username) {
-        setMessages(prev => prev.map(m => {
-          if (m.sender === username && !m.readBy?.includes(readByUser)) {
-            return { ...m, readBy: [...(m.readBy || []), readByUser] };
-          }
-          return m;
-        }));
-      }
+    const onRoomMarkedAsRead = () => {
+      setMessages(prev => prev.map(m => ({ ...m, isRead: true })));
+      setUnreadCount(0);
     };
 
-    const onMessageUnpinned = ({ messageId }: { messageId: string }) => {
-      setPinnedMessages(prev => prev.filter(m => (m._id || m.id) !== messageId));
-      setMessages(prev => prev.map(m =>
-        (m._id || m.id) === messageId ? { ...m, isPinned: false } : m
-      ));
+    const onUpdateUsers = (updatedUsers: User[]) => {
+      setUsers(updatedUsers);
     };
 
     const onSearchResults = (results: Message[]) => {
       setSearchResults(results);
-      setToasts(prev => [...prev, results.length === 0 ? 'No results found' : `Found ${results.length} result(s)`]);
     };
 
-    const onMention = ({ mentionedBy }: { mentionedBy: string }) => {
-      setToasts(prev => [...prev, `@${mentionedBy} mentioned you`]);
+    const onMention = (data: { messageId: string; mentionedBy: string; message: string }) => {
+      setToasts(prev => [...prev, `${data.mentionedBy} mentioned you`]);
     };
 
-
-    const onUserTyping = (data: { username: string; isTyping: boolean }) => {
-      setTypingUsers(prev =>
-        data.isTyping
-          ? (prev.includes(data.username) ? prev : [...prev, data.username])
-          : prev.filter(u => u !== data.username)
-      );
+    const onUserTyping = ({ username: typingUser, isTyping }: { username: string; isTyping: boolean }) => {
+      if (typingUser === username) return; // Don't show own typing
+      
+      setTypingUsers(prev => {
+        if (isTyping) {
+          if (!prev.includes(typingUser)) {
+            return [...prev, typingUser];
+          }
+        } else {
+          return prev.filter(u => u !== typingUser);
+        }
+        return prev;
+      });
     };
 
-    const onUserEvent = (data: { type: 'join' | 'leave'; username: string }) => {
-      setToasts(prev => [...prev, data.type === 'join'
-        ? `🟢 ${data.username} joined`
-        : `🔴 ${data.username} left`
-      ]);
+    const onUserEvent = ({ type, username: eventUsername, avatar }: { type: string; username: string; avatar?: string }) => {
+      if (type === 'join') {
+        setToasts(prev => [...prev, `${eventUsername} joined`]);
+      } else if (type === 'leave') {
+        setToasts(prev => [...prev, `${eventUsername} left`]);
+      }
     };
 
     const onError = ({ message }: { message: string }) => {
-      setToasts(prev => [...prev, `Error: ${message}`]);
+      setToasts(prev => [...prev, message]);
     };
 
-    // Register all event listeners
+    // Register all listeners
     socket.on('loadMessages', onLoadMessages);
     socket.on('loadPinnedMessages', onLoadPinnedMessages);
     socket.on('unreadCount', onUnreadCount);
@@ -303,12 +310,14 @@ export default function Room() {
     socket.on('userEvent', onUserEvent);
     socket.on('error', onError);
 
+    // Handle initial connection loading
     const initTimer = setTimeout(() => {
-      setIsInitializing(false);
-    }, 1000);
+      if (!messages.length) {
+        setIsInitializing(false);
+      }
+    }, 3000);
 
     return () => {
-      // Only remove specific event listeners, not all
       socket.off('loadMessages', onLoadMessages);
       socket.off('loadPinnedMessages', onLoadPinnedMessages);
       socket.off('unreadCount', onUnreadCount);
@@ -348,15 +357,14 @@ export default function Room() {
   }, [id, username]);
 
   useEffect(() => {
-  const handleInsertMention = (event: any) => {
-    const mention = event.detail;
-    setInput(prev => prev + mention);  // Appends @username to input
-    inputRef.current?.focus();
-  };
+    const handleInsertMention = (event: any) => {
+      const mention = event.detail;
+      // This would need to be passed to MessageInput via ref or state
+    };
 
-  window.addEventListener('insertMention', handleInsertMention);
-  return () => window.removeEventListener('insertMention', handleInsertMention);
-}, []);
+    window.addEventListener('insertMention', handleInsertMention);
+    return () => window.removeEventListener('insertMention', handleInsertMention);
+  }, []);
 
   const handleSend = useCallback((messageText: string, replyToId?: string | null, mentions?: string[]) => {
     if (!messageText.trim()) return;
@@ -416,6 +424,10 @@ export default function Room() {
     }
   }, [id]);
 
+  const handleTyping = useCallback((isTyping: boolean) => {
+    socket.emit('typing', { room: id, username, isTyping });
+  }, [id, username]);
+
   if (!id || !username) {
     return (
       <div className="flex items-center justify-center h-screen bg-gray-100 dark:bg-gray-900">
@@ -442,7 +454,14 @@ export default function Room() {
       )}
 
       <div className="flex gap-4 p-5 h-screen bg-gray-100 dark:bg-gray-900">
-        <div className="flex-1 flex flex-col min-w-0 bg-white dark:bg-gray-800 rounded-2xl shadow-lg overflow-hidden">
+        {/* Chat Container */}
+        <div 
+          className="flex flex-col min-w-0 bg-white dark:bg-gray-800 rounded-2xl shadow-lg overflow-hidden transition-all duration-300"
+          style={{ 
+            flex: 1,
+            marginRight: showUserList ? '0' : '0'
+          }}
+        >
           {/* Header with Search */}
           <div className="bg-white dark:bg-gray-800 border-b border-gray-200 dark:border-gray-700 px-6 py-4">
             <div className="flex items-center justify-between">
@@ -487,6 +506,26 @@ export default function Room() {
                   <span className="text-gray-500 dark:text-gray-400">Logged in as</span>
                   <span className="ml-2 font-medium text-gray-700 dark:text-gray-200">{username}</span>
                 </div>
+
+                {/* User List Toggle Button */}
+                <button
+                  onClick={() => setShowUserList(!showUserList)}
+                  className={`p-2 rounded-full transition-all relative ${
+                    showUserList 
+                      ? 'bg-blue-500 text-white hover:bg-blue-600' 
+                      : 'hover:bg-gray-100 dark:hover:bg-gray-700 text-gray-600 dark:text-gray-300'
+                  }`}
+                  title={showUserList ? "Hide user list" : "Show user list"}
+                >
+                  <Users className="w-5 h-5" />
+                  {users.length > 0 && (
+                    <span className={`absolute -top-1 -right-1 text-xs rounded-full w-5 h-5 flex items-center justify-center ${
+                      showUserList ? 'bg-white text-blue-500' : 'bg-blue-500 text-white'
+                    }`}>
+                      {users.length}
+                    </span>
+                  )}
+                </button>
               </div>
             </div>
           </div>
@@ -506,6 +545,9 @@ export default function Room() {
             unreadMessageId={unreadMessageId}
           />
 
+          {/* Typing Indicator */}
+          <TypingIndicator users={typingUsers} />
+
           <MessageInput
             onSend={handleSend}
             onFileUpload={handleFileUpload}
@@ -515,11 +557,26 @@ export default function Room() {
             onCancelReply={() => setReplyingTo(null)}
             disabled={!isConnected}
             users={users.map(u => u.name)}
+            onTyping={handleTyping}
           />
         </div>
 
-        <div className="w-72">
-          <UserList users={users} currentUser={username} />
+        {/* User List - animates width */}
+        <div 
+          className="shrink-0 transition-all duration-300 ease-in-out overflow-hidden h-full"
+          style={{ 
+            width: showUserList ? '288px' : '0px',
+            opacity: showUserList ? 1 : 0
+          }}
+        >
+          <div className="w-72 h-full">
+            <UserList 
+              users={users} 
+              currentUser={username}
+              isOpen={true}
+              showToggle={false}
+            />
+          </div>
         </div>
       </div>
     </>

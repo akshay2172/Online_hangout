@@ -21,8 +21,30 @@ export class ChatGateway implements OnGatewayDisconnect, OnGatewayConnection {
   @WebSocketServer()
   server: Server;
 
+  // Rate limiting storage
+  private messageRateLimit: Map<string, number[]> = new Map();
+  private readonly RATE_LIMIT_WINDOW = 60000; // 1 minute
+  private readonly RATE_LIMIT_MAX = 30; // 30 messages per minute
+
   async handleConnection(client: Socket) {
     console.log(`Client connected: ${client.id} - chat.gateway.ts:25`);
+  }
+
+  // Rate limiting check
+  private checkRateLimit(username: string): boolean {
+    const now = Date.now();
+    const userMessages = this.messageRateLimit.get(username) || [];
+    
+    // Remove old messages outside the window
+    const validMessages = userMessages.filter(time => now - time < this.RATE_LIMIT_WINDOW);
+    
+    if (validMessages.length >= this.RATE_LIMIT_MAX) {
+      return false; // Rate limit exceeded
+    }
+    
+    validMessages.push(now);
+    this.messageRateLimit.set(username, validMessages);
+    return true;
   }
 
   @SubscribeMessage('joinRoom')
@@ -36,6 +58,13 @@ export class ChatGateway implements OnGatewayDisconnect, OnGatewayConnection {
     },
     @ConnectedSocket() client: Socket,
   ) {
+    // Check if user is banned from room
+    const isBanned = await this.chatService.isUserBanned(data.room, data.username);
+    if (isBanned) {
+      client.emit('error', { message: 'You are banned from this room' });
+      return;
+    }
+
     client.join(data.room);
 
     this.chatService.addUserToRoom(data.room, {
@@ -89,6 +118,12 @@ export class ChatGateway implements OnGatewayDisconnect, OnGatewayConnection {
     @ConnectedSocket() client: Socket,
   ) {
     try {
+      // Check rate limit
+      if (!this.checkRateLimit(data.username)) {
+        client.emit('error', { message: 'Rate limit exceeded. Please slow down.' });
+        return;
+      }
+
       // Create message in database
       const message = await this.chatService.createMessage({
         room: data.room,
@@ -97,7 +132,7 @@ export class ChatGateway implements OnGatewayDisconnect, OnGatewayConnection {
         messageType: 'text',
         replyTo: data.replyTo,
         mentions: data.mentions || [],
-        readBy: [data.username], // Sender has read their own message
+        readBy: [data.username],
       });
 
       // Broadcast to ALL users in the room
@@ -106,13 +141,11 @@ export class ChatGateway implements OnGatewayDisconnect, OnGatewayConnection {
       // Send notifications to mentioned users
       if (data.mentions && data.mentions.length > 0) {
         data.mentions.forEach(mentionedUser => {
-          // Find the socket ID of the mentioned user
           const roomUsers = this.chatService.getUsersInRoom(data.room);
           const mentionedUserData = roomUsers.find(u => u.name === mentionedUser);
 
           if (mentionedUserData) {
-            // Send ONLY to that specific user's socket
-            this.server.to(mentionedUserData.socketId).emit('mention', {  // ✅ CORRECT
+            this.server.to(mentionedUserData.socketId).emit('mention', {
               messageId: message._id,
               mentionedBy: data.username,
               message: data.message,
@@ -396,6 +429,225 @@ export class ChatGateway implements OnGatewayDisconnect, OnGatewayConnection {
       }
     } catch (error) {
       client.emit('error', { message: 'Failed to update profile' });
+    }
+  }
+
+  // Room Management
+  @SubscribeMessage('createRoom')
+  async handleCreateRoom(
+    @MessageBody() data: {
+      name: string;
+      description?: string;
+      isPrivate: boolean;
+      type: 'public' | 'private';
+      createdBy: string;
+    },
+    @ConnectedSocket() client: Socket,
+  ) {
+    try {
+      const room = await this.chatService.createRoom({
+        name: data.name,
+        description: data.description,
+        type: data.type,
+        createdBy: data.createdBy,
+        members: [data.createdBy],
+        moderators: [],
+        isActive: true,
+      });
+
+      client.emit('roomCreated', room);
+      
+      // Notify all clients about new room
+      this.server.emit('roomListUpdated', await this.chatService.getAllRooms());
+    } catch (error) {
+      client.emit('error', { message: 'Failed to create room' });
+    }
+  }
+
+  @SubscribeMessage('joinRoomById')
+  async handleJoinRoomById(
+    @MessageBody() data: {
+      roomId: string;
+      username: string;
+      gender: 'male' | 'female' | 'other';
+      country: string;
+      avatar?: string;
+    },
+    @ConnectedSocket() client: Socket,
+  ) {
+    try {
+      const room = await this.chatService.getRoomById(data.roomId);
+      if (!room) {
+        client.emit('error', { message: 'Room not found' });
+        return;
+      }
+
+      if (room.type === 'private' && !room.members.includes(data.username)) {
+        client.emit('error', { message: 'This room is private' });
+        return;
+      }
+
+      await this.chatService.addMemberToRoom(room.name, data.username);
+      
+      // Now join the room
+      client.join(room.name);
+      this.chatService.addUserToRoom(room.name, {
+        name: data.username,
+        gender: data.gender,
+        country: data.country,
+        socketId: client.id,
+        isActive: true,
+        avatar: data.avatar,
+        status: 'online',
+      });
+
+      client.emit('joinedRoom', room);
+      this.server.to(room.name).emit('userEvent', {
+        type: 'join',
+        username: data.username,
+      });
+      this.server.to(room.name).emit('updateUsers', this.chatService.getUsersInRoom(room.name));
+    } catch (error) {
+      client.emit('error', { message: 'Failed to join room' });
+    }
+  }
+
+  @SubscribeMessage('deleteRoom')
+  async handleDeleteRoom(
+    @MessageBody() data: {
+      roomId: string;
+      username: string;
+    },
+    @ConnectedSocket() client: Socket,
+  ) {
+    try {
+      const room = await this.chatService.getRoomById(data.roomId);
+      if (!room || room.createdBy !== data.username) {
+        client.emit('error', { message: 'Only room owner can delete the room' });
+        return;
+      }
+
+      await this.chatService.deleteRoom(data.roomId);
+      
+      this.server.to(room.name).emit('roomDeleted', { roomId: data.roomId });
+      this.server.emit('roomListUpdated', await this.chatService.getAllRooms());
+    } catch (error) {
+      client.emit('error', { message: 'Failed to delete room' });
+    }
+  }
+
+  // Moderation
+  @SubscribeMessage('kickUser')
+  async handleKickUser(
+    @MessageBody() data: {
+      room: string;
+      username: string;
+      by: string;
+    },
+    @ConnectedSocket() client: Socket,
+  ) {
+    try {
+      const room = await this.chatService.getRoomByName(data.room);
+      if (!room) return;
+
+      // Check if kicker has permission
+      const canKick = room.createdBy === data.by || room.moderators?.includes(data.by);
+      if (!canKick) {
+        client.emit('error', { message: 'You do not have permission to kick users' });
+        return;
+      }
+
+      // Find user's socket and kick them
+      const userSocket = this.chatService.getUserSocketId(data.room, data.username);
+      if (userSocket) {
+        this.server.to(userSocket).emit('kicked', { room: data.room, by: data.by });
+        const socket = this.server.sockets.sockets.get(userSocket);
+        if (socket) {
+          socket.leave(data.room);
+        }
+      }
+
+      this.chatService.removeUserFromRoom(data.room, data.username);
+      this.server.to(data.room).emit('userKicked', { username: data.username, by: data.by });
+      this.server.to(data.room).emit('updateUsers', this.chatService.getUsersInRoom(data.room));
+    } catch (error) {
+      client.emit('error', { message: 'Failed to kick user' });
+    }
+  }
+
+  @SubscribeMessage('banUser')
+  async handleBanUser(
+    @MessageBody() data: {
+      room: string;
+      username: string;
+      by: string;
+    },
+    @ConnectedSocket() client: Socket,
+  ) {
+    try {
+      const room = await this.chatService.getRoomByName(data.room);
+      if (!room) return;
+
+      // Check if banner has permission
+      const canBan = room.createdBy === data.by || room.moderators?.includes(data.by);
+      if (!canBan) {
+        client.emit('error', { message: 'You do not have permission to ban users' });
+        return;
+      }
+
+      // Ban user
+      await this.chatService.banUserFromRoom(data.room, data.username);
+
+      // Find user's socket and kick them
+      const userSocket = this.chatService.getUserSocketId(data.room, data.username);
+      if (userSocket) {
+        this.server.to(userSocket).emit('banned', { room: data.room, by: data.by });
+        const socket = this.server.sockets.sockets.get(userSocket);
+        if (socket) {
+          socket.leave(data.room);
+        }
+      }
+
+      this.chatService.removeUserFromRoom(data.room, data.username);
+      this.server.to(data.room).emit('userBanned', { username: data.username, by: data.by });
+      this.server.to(data.room).emit('updateUsers', this.chatService.getUsersInRoom(data.room));
+    } catch (error) {
+      client.emit('error', { message: 'Failed to ban user' });
+    }
+  }
+
+  @SubscribeMessage('promoteUser')
+  async handlePromoteUser(
+    @MessageBody() data: {
+      room: string;
+      username: string;
+      role: 'moderator' | 'admin';
+      by: string;
+    },
+    @ConnectedSocket() client: Socket,
+  ) {
+    try {
+      const room = await this.chatService.getRoomByName(data.room);
+      if (!room) return;
+
+      // Only owner can promote to admin, owner and admins can promote to moderator
+      const canPromote = data.role === 'admin' 
+        ? room.createdBy === data.by
+        : room.createdBy === data.by || room.moderators?.includes(data.by);
+
+      if (!canPromote) {
+        client.emit('error', { message: 'You do not have permission to promote users' });
+        return;
+      }
+
+      await this.chatService.promoteUser(data.room, data.username, data.role);
+      this.server.to(data.room).emit('userPromoted', { 
+        username: data.username, 
+        role: data.role,
+        by: data.by 
+      });
+    } catch (error) {
+      client.emit('error', { message: 'Failed to promote user' });
     }
   }
 
