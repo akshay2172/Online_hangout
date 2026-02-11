@@ -346,16 +346,24 @@ export class ChatService {
 
   // File Management (metadata only, actual files stored separately)
   async saveFileMessage(room: string, sender: string, fileData: any): Promise<MessageDocument> {
-    const messageData = {
-      room,
-      sender,
-      message: fileData.originalName,
-      messageType: fileData.mimetype.startsWith('image/') ? 'image' : 'file',
-      fileData,
-    };
-
-    return await this.createMessage(messageData);
+  let messageType = 'file';
+  if (fileData.mimetype.startsWith('image/')) {
+    messageType = 'image';
+  } else if (fileData.mimetype.startsWith('audio/')) {
+    messageType = 'voice';    // ✅ Add this condition
   }
+
+  const messageData = {
+    room,
+    sender,
+    message: fileData.originalName,
+    messageType,
+    fileData,
+    readBy: [sender],        // ✅ Important: set readBy to avoid unread count issues
+  };
+
+  return await this.createMessage(messageData);
+}
 
   // Analytics
   async getMessageCount(room: string): Promise<number> {

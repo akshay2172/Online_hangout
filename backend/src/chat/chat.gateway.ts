@@ -27,7 +27,7 @@ export class ChatGateway implements OnGatewayDisconnect, OnGatewayConnection {
   private readonly RATE_LIMIT_MAX = 30; // 30 messages per minute
 
   async handleConnection(client: Socket) {
-    console.log(`Client connected: ${client.id} - chat.gateway.ts:25`);
+    console.log(`Client connected: ${client.id} - chat.gateway.ts:30`);
   }
 
   // Rate limiting check
@@ -114,11 +114,17 @@ export class ChatGateway implements OnGatewayDisconnect, OnGatewayConnection {
       username: string;
       replyTo?: string;
       mentions?: string[];
+      messageType?: 'text' | 'gif' | 'sticker';
+      gifData?: {
+        width: number;
+        height: number;
+        preview: string;
+      };
     },
     @ConnectedSocket() client: Socket,
   ) {
     try {
-      // Check rate limit
+
       if (!this.checkRateLimit(data.username)) {
         client.emit('error', { message: 'Rate limit exceeded. Please slow down.' });
         return;
@@ -129,12 +135,12 @@ export class ChatGateway implements OnGatewayDisconnect, OnGatewayConnection {
         room: data.room,
         sender: data.username,
         message: data.message,
-        messageType: 'text',
+        messageType: data.messageType || 'text',
         replyTo: data.replyTo,
         mentions: data.mentions || [],
         readBy: [data.username],
+        gifData: data.gifData,
       });
-
       // Broadcast to ALL users in the room
       this.server.to(data.room).emit('receiveMessage', message);
 
@@ -233,7 +239,7 @@ export class ChatGateway implements OnGatewayDisconnect, OnGatewayConnection {
         });
       }
     } catch (error) {
-      console.error('Reaction error: - chat.gateway.ts:203', error);
+      console.error('Reaction error: - chat.gateway.ts:242', error);
     }
   }
 
@@ -258,7 +264,7 @@ export class ChatGateway implements OnGatewayDisconnect, OnGatewayConnection {
         });
       }
     } catch (error) {
-      console.error('Mark as read error: - chat.gateway.ts:228', error);
+      console.error('Mark as read error: - chat.gateway.ts:267', error);
     }
   }
 
@@ -276,7 +282,7 @@ export class ChatGateway implements OnGatewayDisconnect, OnGatewayConnection {
         username: data.username,
       });
     } catch (error) {
-      console.error('Mark room as read error: - chat.gateway.ts:246', error);
+      console.error('Mark room as read error: - chat.gateway.ts:285', error);
     }
   }
 
@@ -310,7 +316,7 @@ export class ChatGateway implements OnGatewayDisconnect, OnGatewayConnection {
         this.server.to(data.room).emit('messagePinned', pinnedMessage);
       }
     } catch (error) {
-      console.error('Pin message error: - chat.gateway.ts:280', error);
+      console.error('Pin message error: - chat.gateway.ts:319', error);
     }
   }
 
@@ -330,7 +336,7 @@ export class ChatGateway implements OnGatewayDisconnect, OnGatewayConnection {
         });
       }
     } catch (error) {
-      console.error('Unpin message error: - chat.gateway.ts:300', error);
+      console.error('Unpin message error: - chat.gateway.ts:339', error);
     }
   }
 
@@ -358,7 +364,7 @@ export class ChatGateway implements OnGatewayDisconnect, OnGatewayConnection {
 
       this.server.to(data.room).emit('receiveMessage', message);
     } catch (error) {
-      console.error('File upload error: - chat.gateway.ts:328', error);
+      console.error('File upload error: - chat.gateway.ts:367', error);
     }
   }
 

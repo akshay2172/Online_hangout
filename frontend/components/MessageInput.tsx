@@ -1,18 +1,18 @@
 // frontend/components/MessageInput.tsx - ENHANCED WITH FIXES
 import React, { useState, useRef, useEffect, useCallback } from 'react';
-import { 
-  Send, 
-  Paperclip, 
-  Smile, 
-  X, 
-  Mic, 
-  Image as ImageIcon, 
-  File as FileIcon, 
-  AtSign, 
-  MoreVertical, 
-  Moon, 
-  Sun, 
-  Sparkles, 
+import {
+  Send,
+  Paperclip,
+  Smile,
+  X,
+  Mic,
+  Image as ImageIcon,
+  File as FileIcon,
+  AtSign,
+  MoreVertical,
+  Moon,
+  Sun,
+  Sparkles,
   FileImage,
   Loader2
 } from 'lucide-react';
@@ -20,10 +20,10 @@ import EmojiPicker, { EmojiClickData, Theme as EmojiTheme } from 'emoji-picker-r
 import { useDarkMode } from '../pages/_app';
 
 interface Props {
-  onSend: (message: string, replyTo?: string | null, mentions?: string[]) => void;
+  onSend: (message: string, replyTo?: string | null, mentions?: string[], messageType?: 'text' | 'gif' | 'sticker') => void;
   onFileUpload?: (file: File) => void;
   onVoiceRecord?: (audioBlob: Blob) => void;
-  onSendGif?: (gifUrl: string) => void;
+  onSendGif?: (gifUrl: string, gifData: { width: number; height: number; preview: string }) => void;
   onSendSticker?: (stickerUrl: string) => void;
   replyTo?: any;
   replyPreview?: string;
@@ -174,22 +174,27 @@ const MessageInput: React.FC<Props> = ({
     inputRef.current?.focus();
   };
 
-  const handleSend = () => {
-    if ((input.trim() === '' && !selectedFile) || disabled) return;
 
-    if (selectedFile && onFileUpload) {
-      handleFileUpload(selectedFile);
-      setSelectedFile(null);
-    } else if (input.trim()) {
-      const mentions = extractMentions(input);
-      onSend(input.trim(), replyTo?._id || replyTo?.id, mentions);
-    }
+const handleSend = async () => {
+  if ((input.trim() === '' && !selectedFile) || disabled) return;
 
+  if (selectedFile && onFileUpload) {
+    setIsUploading(true);          // already done inside handleFileUpload
+    await handleFileUpload(selectedFile);   // ✅ await the upload
+    setSelectedFile(null);        // clear only after upload finishes
+  } else if (input.trim()) {
+    const mentions = extractMentions(input);
+    onSend(input.trim(), replyTo ? String(replyTo._id || replyTo.id) : null, mentions, 'text');
     setInput('');
-    setShowEmojiPicker(false);
-    onTyping?.(false);
-    setTimeout(adjustHeight, 0);
-  };
+  }
+
+  setShowEmojiPicker(false);
+  onTyping?.(false);
+  setTimeout(adjustHeight, 0);
+};
+
+
+
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -255,15 +260,15 @@ const MessageInput: React.FC<Props> = ({
 
   const handleFileUpload = async (file: File) => {
     if (!onFileUpload) return;
-    
+
     setIsUploading(true);
     setUploadProgress(0);
-    
+
     // Simulate progress for better UX
     const progressInterval = setInterval(() => {
       setUploadProgress(prev => Math.min(prev + 10, 90));
     }, 200);
-    
+
     try {
       await onFileUpload(file);
       setUploadProgress(100);
@@ -333,11 +338,28 @@ const MessageInput: React.FC<Props> = ({
   };
 
   const searchGifs = async (query: string) => {
-    if (!query.trim()) return;
+    if (!query.trim()) {
+      // Load trending GIFs if no query
+      setIsLoadingGifs(true);
+      try {
+        const response = await fetch(
+          `https://tenor.googleapis.com/v2/featured?key=${TENOR_API_KEY}&limit=30`
+        );
+        const data = await response.json();
+        setGifs(data.results || []);
+      } catch (error) {
+        console.error('Error fetching trending GIFs:', error);
+        setGifs([]);
+      } finally {
+        setIsLoadingGifs(false);
+      }
+      return;
+    }
+
     setIsLoadingGifs(true);
     try {
       const response = await fetch(
-        `https://tenor.googleapis.com/v2/search?q=${encodeURIComponent(query)}&key=${TENOR_API_KEY}&limit=20`
+        `https://tenor.googleapis.com/v2/search?q=${encodeURIComponent(query)}&key=${TENOR_API_KEY}&limit=30`
       );
       const data = await response.json();
       setGifs(data.results || []);
@@ -365,15 +387,24 @@ const MessageInput: React.FC<Props> = ({
     }
   };
 
-  const handleGifSelect = (gifUrl: string) => {
+  const handleGifSelect = (gif: any) => {
     if (onSendGif) {
-      onSendGif(gifUrl);
+      // Extract the actual GIF URL from Tenor's response
+      const gifUrl = gif.media_formats?.gif?.url || gif.media_formats?.mediumgif?.url;
+      const gifData = {
+        width: gif.media_formats?.gif?.dims?.[0] || 400,
+        height: gif.media_formats?.gif?.dims?.[1] || 300,
+        preview: gif.media_formats?.tinygif?.url || gifUrl,
+      };
+      onSendGif(gifUrl, gifData);
     } else {
-      // Fallback: send as message
-      onSend(gifUrl, replyTo?._id || replyTo?.id, []);
+      // Fallback: send as special message type
+      const gifUrl = gif.media_formats?.gif?.url || gif.media_formats?.mediumgif?.url;
+      onSend(gifUrl, replyTo ? String(replyTo._id || replyTo.id) : null, [], 'gif');
     }
     setShowGifPicker(false);
     setShowMenu(false);
+    setGifSearch('');
   };
 
   const handleStickerSelect = (stickerUrl: string) => {
@@ -410,9 +441,9 @@ const MessageInput: React.FC<Props> = ({
   // Voice recording UI
   if (isRecording) {
     return (
-      <div 
+      <div
         className="border-t px-4 py-3 shrink-0"
-        style={{ 
+        style={{
           backgroundColor: 'var(--bg-primary)',
           borderColor: 'var(--border-color)'
         }}
@@ -443,30 +474,30 @@ const MessageInput: React.FC<Props> = ({
   }
 
   return (
-    <div 
+    <div
       className="border-t px-4 py-3 shrink-0"
-      style={{ 
+      style={{
         backgroundColor: 'var(--bg-primary)',
         borderColor: 'var(--border-color)'
       }}
     >
       {/* Reply Preview */}
       {replyTo !== null && (
-        <div 
+        <div
           className="mb-3 flex items-center justify-between rounded-lg px-3 py-2 border-l-4 min-w-0"
-          style={{ 
+          style={{
             backgroundColor: 'var(--bg-secondary)',
             borderLeftColor: 'var(--accent-color)'
           }}
         >
           <div className="flex items-center space-x-2 overflow-hidden min-w-0">
-            <span 
+            <span
               className="text-sm font-medium shrink-0"
               style={{ color: 'var(--accent-color)' }}
             >
               Replying to:
             </span>
-            <span 
+            <span
               className="text-sm truncate min-w-0"
               style={{ color: 'var(--text-secondary)' }}
             >
@@ -487,9 +518,9 @@ const MessageInput: React.FC<Props> = ({
 
       {/* Selected File Preview */}
       {selectedFile && (
-        <div 
+        <div
           className="mb-3 flex items-center justify-between rounded-lg px-3 py-2 border"
-          style={{ 
+          style={{
             backgroundColor: 'var(--bg-secondary)',
             borderColor: 'var(--border-color)'
           }}
@@ -526,13 +557,13 @@ const MessageInput: React.FC<Props> = ({
             <span className="text-xs" style={{ color: 'var(--text-muted)' }}>Uploading...</span>
             <span className="text-xs" style={{ color: 'var(--text-muted)' }}>{uploadProgress}%</span>
           </div>
-          <div 
+          <div
             className="w-full h-2 rounded-full overflow-hidden"
             style={{ backgroundColor: 'var(--bg-tertiary)' }}
           >
-            <div 
+            <div
               className="h-full rounded-full transition-all duration-300"
-              style={{ 
+              style={{
                 width: `${uploadProgress}%`,
                 backgroundColor: 'var(--accent-color)'
               }}
@@ -543,9 +574,9 @@ const MessageInput: React.FC<Props> = ({
 
       {/* Mentions Dropdown */}
       {showMentions && filteredUsers.length > 0 && (
-        <div 
+        <div
           className="mb-2 border rounded-lg shadow-lg max-h-40 overflow-y-auto"
-          style={{ 
+          style={{
             backgroundColor: 'var(--menu-bg)',
             borderColor: 'var(--border-color)'
           }}
@@ -555,7 +586,7 @@ const MessageInput: React.FC<Props> = ({
               key={user}
               onClick={() => handleMentionSelect(user)}
               className="w-full px-4 py-2 text-left flex items-center gap-2 transition-colors"
-              style={{ 
+              style={{
                 color: 'var(--text-primary)',
                 '--hover-bg': 'var(--menu-hover)'
               } as React.CSSProperties}
@@ -571,9 +602,9 @@ const MessageInput: React.FC<Props> = ({
 
       {/* GIF Picker */}
       {showGifPicker && (
-        <div 
+        <div
           className="mb-2 border rounded-lg shadow-lg p-4 max-h-96 overflow-y-auto"
-          style={{ 
+          style={{
             backgroundColor: 'var(--menu-bg)',
             borderColor: 'var(--border-color)'
           }}
@@ -588,7 +619,7 @@ const MessageInput: React.FC<Props> = ({
                 if (e.target.value) searchGifs(e.target.value);
               }}
               className="w-full p-2 border rounded transition-colors"
-              style={{ 
+              style={{
                 backgroundColor: 'var(--bg-secondary)',
                 borderColor: 'var(--border-color)',
                 color: 'var(--text-primary)'
@@ -607,7 +638,7 @@ const MessageInput: React.FC<Props> = ({
                   src={gif.media_formats?.tinygif?.url || gif.media_formats?.gif?.url}
                   alt="GIF"
                   className="w-full h-24 object-cover rounded cursor-pointer hover:opacity-80 transition-opacity"
-                  onClick={() => handleGifSelect(gif.media_formats?.gif?.url)}
+                  onClick={() => handleGifSelect(gif)}
                   loading="lazy"
                 />
               ))}
@@ -618,19 +649,19 @@ const MessageInput: React.FC<Props> = ({
 
       {/* Sticker Picker */}
       {showStickerPicker && (
-        <div 
+        <div
           className="mb-2 border rounded-lg shadow-lg p-4 max-h-96 overflow-y-auto"
-          style={{ 
+          style={{
             backgroundColor: 'var(--menu-bg)',
             borderColor: 'var(--border-color)'
           }}
         >
           <div className="flex items-center justify-between mb-3">
             <span className="text-sm font-medium" style={{ color: 'var(--text-primary)' }}>Stickers</span>
-            <button 
+            <button
               onClick={() => searchStickers()}
               className="text-xs px-2 py-1 rounded transition-colors"
-              style={{ 
+              style={{
                 backgroundColor: 'var(--bg-secondary)',
                 color: 'var(--text-secondary)'
               }}
@@ -685,7 +716,7 @@ const MessageInput: React.FC<Props> = ({
           <button
             onClick={() => setShowMenu(!showMenu)}
             className="p-2 rounded-full transition-colors"
-            style={{ 
+            style={{
               color: 'var(--text-muted)',
               '--hover-bg': 'var(--bg-secondary)',
               '--hover-color': 'var(--text-primary)'
@@ -708,7 +739,7 @@ const MessageInput: React.FC<Props> = ({
             <div
               ref={menuRef}
               className="absolute bottom-full left-0 mb-2 rounded-xl shadow-xl py-1.5 min-w-[180px] z-50 theme-menu border"
-              style={{ 
+              style={{
                 backgroundColor: 'var(--menu-bg)',
                 borderColor: 'var(--border-color)'
               }}
@@ -790,8 +821,8 @@ const MessageInput: React.FC<Props> = ({
             placeholder={disabled ? "Connecting..." : "Type a message... (@mention users)"}
             disabled={disabled}
             rows={MIN_ROWS}
-            style={{ 
-              minHeight: `${MIN_ROWS * LINE_HEIGHT}px`, 
+            style={{
+              minHeight: `${MIN_ROWS * LINE_HEIGHT}px`,
               maxHeight: `${MAX_ROWS * LINE_HEIGHT}px`,
               backgroundColor: 'var(--bg-secondary)',
               color: 'var(--text-primary)'
@@ -802,7 +833,7 @@ const MessageInput: React.FC<Props> = ({
           <button
             onClick={() => setShowEmojiPicker(!showEmojiPicker)}
             className="absolute right-2 bottom-2 p-1.5 rounded-full transition-colors"
-            style={{ 
+            style={{
               color: 'var(--text-muted)',
               '--hover-bg': 'var(--bg-tertiary)',
               '--hover-color': 'var(--text-primary)'
@@ -844,7 +875,7 @@ const MessageInput: React.FC<Props> = ({
             onClick={startRecording}
             disabled={disabled}
             className="p-3 rounded-full transition-all duration-200 shrink-0"
-            style={{ 
+            style={{
               backgroundColor: 'var(--bg-secondary)',
               color: 'var(--text-muted)'
             }}
@@ -867,11 +898,10 @@ const MessageInput: React.FC<Props> = ({
           <button
             onClick={handleSend}
             disabled={disabled || isUploading}
-            className={`p-3 rounded-full transition-all duration-200 shrink-0 ${
-              !disabled && !isUploading
-                ? 'bg-blue-500 hover:bg-blue-600 text-white shadow-md hover:shadow-lg transform hover:scale-105'
-                : 'cursor-not-allowed'
-            }`}
+            className={`p-3 rounded-full transition-all duration-200 shrink-0 ${!disabled && !isUploading
+              ? 'bg-blue-500 hover:bg-blue-600 text-white shadow-md hover:shadow-lg transform hover:scale-105'
+              : 'cursor-not-allowed'
+              }`}
             style={disabled || isUploading ? {
               backgroundColor: 'var(--bg-tertiary)',
               color: 'var(--text-muted)'
