@@ -407,7 +407,11 @@ const handleSend = async () => {
     setGifSearch('');
   };
 
-  const handleStickerSelect = (stickerUrl: string) => {
+  const handleStickerSelect = (stickerUrl: string | undefined) => {
+    if (!stickerUrl) {
+      console.warn('Sticker URL is undefined');
+      return;
+    }
     if (onSendSticker) {
       onSendSticker(stickerUrl);
     } else {
@@ -685,7 +689,7 @@ const handleSend = async () => {
                   src={sticker.media_formats?.tinygif?.url || sticker.media_formats?.gif?.url}
                   alt="Sticker"
                   className="w-full h-20 object-contain cursor-pointer hover:opacity-80 hover:scale-105 transition-all"
-                  onClick={() => handleStickerSelect(sticker.media_formats?.gif?.url)}
+                  onClick={() => handleStickerSelect(sticker.media_formats?.gif?.url || sticker.media_formats?.tinygif?.url)}
                   loading="lazy"
                 />
               ))}

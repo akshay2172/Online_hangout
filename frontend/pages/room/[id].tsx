@@ -372,7 +372,7 @@ export default function Room() {
     }, []);
 
     const handleSend = useCallback((messageText: string, replyToId?: string | null, mentions?: string[]) => {
-        if (!messageText.trim()) return;
+        if (!messageText || !messageText.trim()) return;
         socket.emit('sendMessage', { room: id, message: messageText, username, replyTo: replyToId, mentions });
         setReplyingTo(null);
     }, [id, username]);

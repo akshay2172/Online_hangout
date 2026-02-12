@@ -23,8 +23,8 @@ export class ChatGateway implements OnGatewayDisconnect, OnGatewayConnection {
 
   // Rate limiting storage
   private messageRateLimit: Map<string, number[]> = new Map();
-  private readonly RATE_LIMIT_WINDOW = 60000; // 1 minute
-  private readonly RATE_LIMIT_MAX = 30; // 30 messages per minute
+  private readonly RATE_LIMIT_WINDOW = 2000; // 2 sec
+  private readonly RATE_LIMIT_MAX = 1; // 1 messages per 1/30 min
 
   async handleConnection(client: Socket) {
     console.log(`Client connected: ${client.id} - chat.gateway.ts:30`);
@@ -126,7 +126,7 @@ export class ChatGateway implements OnGatewayDisconnect, OnGatewayConnection {
     try {
 
       if (!this.checkRateLimit(data.username)) {
-        client.emit('error', { message: 'Rate limit exceeded. Please slow down.' });
+        client.emit('error', { message: 'Please slow down.' });
         return;
       }
 
